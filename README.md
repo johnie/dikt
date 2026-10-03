@@ -36,7 +36,7 @@ bun run dikt "https://www.youtube.com/watch?v=aircAruvnKk" --language en
 Swedish, or any non-EU model (audio is processed outside the EU):
 
 ```bash
-bun run dikt "https://www.youtube.com/watch?v=8PO2XGDooNU" -m google/gemini-3.5-transcribe -r global -l sv
+bun run dikt "https://www.youtube.com/watch?v=VIDEO_ID" -m google/gemini-3.5-transcribe -r global -l sv
 ```
 
 ## EU data residency
