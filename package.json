@@ -1,0 +1,25 @@
+{
+  "name": "dikt",
+  "description": "Transcribe videos to Markdown with yt-dlp and OpenRouter speech-to-text",
+  "license": "MIT",
+  "repository": "github:johnie/dikt",
+  "private": true,
+  "type": "module",
+  "module": "index.ts",
+  "scripts": {
+    "dikt": "bun index.ts",
+    "check": "ultracite check",
+    "fix": "ultracite fix",
+    "prepare": "lefthook install"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "lefthook": "^2.1.16",
+    "oxfmt": "^0.71.0",
+    "oxlint": "^1.86.0",
+    "ultracite": "7.12.2"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  }
+}
