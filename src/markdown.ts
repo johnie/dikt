@@ -1,6 +1,7 @@
 import type { AudioChunk } from "./audio.ts";
 import type { VideoInfo } from "./download.ts";
-import type { Region, Segment, Transcription, Word } from "./openrouter.ts";
+import type { Segment, Transcription, Word } from "./openrouter.ts";
+import type { Region } from "./settings.ts";
 
 export interface ChunkTranscript {
   chunk: AudioChunk;
@@ -11,6 +12,7 @@ interface Paragraph {
   /** Undefined when the model returned no timestamps for this paragraph. */
   start: number | undefined;
   speaker: number | undefined;
+  chunkIndex: number;
   text: string;
 }
 
@@ -37,7 +39,7 @@ const formatTimestamp = (seconds: number, withHours: boolean): string => {
 const chapterIndexAt = (info: VideoInfo, time: number) =>
   info.chapters.findLastIndex((c) => c.start <= time);
 
-/** Groups words into sentence segments, closing on sentence punctuation or a speaker change. */
+/** Groups words into bounded sentence segments without inventing timestamps. */
 const sentencesFromWords = (words: Word[]): Segment[] => {
   const sentences: Segment[] = [];
   let current: Segment | undefined;
@@ -46,7 +48,12 @@ const sentencesFromWords = (words: Word[]): Segment[] => {
     if (!text) {
       continue;
     }
-    if (current && current.speaker === word.speaker) {
+    if (
+      current &&
+      current.speaker === word.speaker &&
+      word.start - current.end <= PARAGRAPH_GAP_SECONDS &&
+      word.start - current.start < MAX_SEGMENT_SECONDS
+    ) {
       current.text += ` ${text}`;
       current.end = word.end;
     } else {
@@ -65,9 +72,65 @@ const sentencesFromWords = (words: Word[]): Segment[] => {
   return sentences;
 };
 
+const hasRealTiming = (item: { start: number; end: number }): boolean =>
+  Number.isFinite(item.start) &&
+  Number.isFinite(item.end) &&
+  item.start >= 0 &&
+  item.end > item.start;
+
+/** The same real timing selection is shared by Markdown, evidence and subtitles. */
+export const timedSegments = (
+  transcription: Transcription,
+  chunkDuration: number
+): Segment[] | undefined => {
+  const segments = transcription.segments?.filter((segment) =>
+    segment.text.trim()
+  );
+  const words = transcription.words?.filter((word) => word.word.trim());
+  const validSegments =
+    segments?.length && segments.every(hasRealTiming) ? segments : undefined;
+  const validWords =
+    words?.length && words.every(hasRealTiming) ? words : undefined;
+  const selected =
+    validWords &&
+    (!validSegments ||
+      validSegments.some(
+        (segment) => segment.end - segment.start > MAX_SEGMENT_SECONDS
+      ))
+      ? sentencesFromWords(validWords)
+      : validSegments;
+  if (
+    !selected ||
+    !Number.isFinite(chunkDuration) ||
+    chunkDuration <= 0 ||
+    selected.some((segment) => segment.start >= chunkDuration)
+  ) {
+    return undefined;
+  }
+  // Providers can timestamp encoder padding beyond the real source boundary.
+  // Preserve their raw response; bound only the presentation/evidence interval.
+  return selected.some((segment) => segment.end > chunkDuration)
+    ? selected.map((segment) =>
+        segment.end > chunkDuration
+          ? { ...segment, end: chunkDuration }
+          : segment
+      )
+    : selected;
+};
+
+export const speakerLabel = (
+  chunkIndex: number,
+  speaker: number,
+  options: RenderOptions
+): string => {
+  const name = options.speakerNames?.[`${chunkIndex + 1}:${speaker + 1}`];
+  return `${name ?? `Speaker ${speaker + 1}`} (chunk ${chunkIndex + 1})`;
+};
+
 const paragraphsFromSegments = (
   segments: Segment[],
   offset: number,
+  chunkIndex: number,
   info: VideoInfo
 ): Paragraph[] => {
   const paragraphs: Paragraph[] = [];
@@ -90,7 +153,7 @@ const paragraphsFromSegments = (
         SENTENCE_END.test(current.text));
 
     if (breaks) {
-      current = { speaker: segment.speaker, start, text };
+      current = { chunkIndex, speaker: segment.speaker, start, text };
       paragraphs.push(current);
     } else if (current) {
       current.text += ` ${text}`;
@@ -104,15 +167,22 @@ const paragraphsFromSegments = (
 const paragraphsFromText = (
   text: string,
   start: number,
+  chunkIndex: number,
   language: string | undefined
 ): Paragraph[] => {
-  const segmenter = new Intl.Segmenter(language, { granularity: "sentence" });
+  let segmenter: Intl.Segmenter;
+  try {
+    segmenter = new Intl.Segmenter(language, { granularity: "sentence" });
+  } catch {
+    segmenter = new Intl.Segmenter(undefined, { granularity: "sentence" });
+  }
   const paragraphs: Paragraph[] = [];
   let buffer = "";
   for (const { segment } of segmenter.segment(text)) {
     buffer += segment;
     if (buffer.length >= PARAGRAPH_CHARS) {
       paragraphs.push({
+        chunkIndex,
         speaker: undefined,
         start: undefined,
         text: buffer.trim(),
@@ -122,6 +192,7 @@ const paragraphsFromText = (
   }
   if (buffer.trim()) {
     paragraphs.push({
+      chunkIndex,
       speaker: undefined,
       start: undefined,
       text: buffer.trim(),
@@ -135,9 +206,10 @@ const paragraphsFromText = (
 
 export interface RenderOptions {
   model: string;
-  region: Region;
+  region: Region | "local";
   language: string | undefined;
   transcribedAt: Date;
+  speakerNames?: Record<string, string>;
 }
 
 export const renderMarkdown = (
@@ -191,15 +263,18 @@ export const renderMarkdown = (
   ];
 
   const paragraphs = transcripts.flatMap(({ chunk, transcription }) => {
-    const { segments, words } = transcription;
-    const timed =
-      words &&
-      (!segments || segments.some((s) => s.end - s.start > MAX_SEGMENT_SECONDS))
-        ? sentencesFromWords(words)
-        : segments;
+    const timed = timedSegments(transcription, chunk.end - chunk.start);
     return timed
-      ? paragraphsFromSegments(timed, chunk.start, info)
-      : paragraphsFromText(transcription.text, chunk.start, language);
+      ? paragraphsFromSegments(timed, chunk.start, chunk.index, info)
+      : paragraphsFromText(
+          transcription.text.trim() ||
+            transcription.segments?.map((segment) => segment.text).join(" ") ||
+            transcription.words?.map((word) => word.word).join(" ") ||
+            "",
+          chunk.start,
+          chunk.index,
+          language
+        );
   });
 
   let chapterIndex = -1;
@@ -218,7 +293,7 @@ export const renderMarkdown = (
       paragraph.start === undefined ? undefined : link(paragraph.start),
       paragraph.speaker === undefined
         ? undefined
-        : `**Speaker ${paragraph.speaker + 1}:**`,
+        : `**${speakerLabel(paragraph.chunkIndex, paragraph.speaker, options)}:**`,
     ].filter(Boolean);
     lines.push([...prefix, paragraph.text].join(" "), "");
   }

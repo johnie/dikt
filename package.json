@@ -1,16 +1,21 @@
 {
   "name": "dikt",
-  "description": "Transcribe videos to Markdown with yt-dlp and OpenRouter speech-to-text",
+  "private": true,
+  "description": "Resumable cloud and offline transcription, subtitles, and source-linked notes",
   "license": "MIT",
   "repository": "github:johnie/dikt",
-  "private": true,
   "type": "module",
   "module": "index.ts",
   "scripts": {
     "dikt": "bun index.ts",
-    "check": "ultracite check",
-    "fix": "ultracite fix",
+    "check": "bunx --bun oxlint --config oxlint.config.ts && bunx --bun oxfmt --check --config oxfmt.config.ts",
+    "fix": "bunx --bun oxlint --config oxlint.config.ts --fix && bunx --bun oxfmt --config oxfmt.config.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
     "prepare": "lefthook install"
+  },
+  "dependencies": {
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/bun": "latest",
