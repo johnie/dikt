@@ -3,6 +3,8 @@ import path from "node:path";
 
 import { z } from "zod";
 
+import { agentNotesModel, generateAgentNotes } from "./agent-notes.ts";
+import type { NotesProvider } from "./agent-notes.ts";
 import { splitAudio } from "./audio.ts";
 import type { AudioChunk } from "./audio.ts";
 import type { Budget } from "./budget.ts";
@@ -16,7 +18,7 @@ import {
 import { resolveInput } from "./download.ts";
 import type { VideoInfo } from "./download.ts";
 import { buildEvidence, outputStem, renderOutput } from "./exports.ts";
-import type { OutputFormat } from "./exports.ts";
+import type { OutputFormat, TranscriptEvidence } from "./exports.ts";
 import { transcribeLocal } from "./local.ts";
 import type { LocalOptions } from "./local.ts";
 import type { ChunkTranscript, RenderOptions } from "./markdown.ts";
@@ -28,6 +30,7 @@ import {
   parseNotesResult,
   renderNotes,
 } from "./notes.ts";
+import type { NotesResult } from "./notes.ts";
 import { transcriptionSchema, transcribe } from "./openrouter.ts";
 import type { TranscribeOptions, Transcription } from "./openrouter.ts";
 import { mapLimit } from "./pool.ts";
@@ -40,6 +43,8 @@ export interface RunOptions {
   modelInfo: ModelInfo | undefined;
   notesModelInfo: ModelInfo | undefined;
   notesModel: string | undefined;
+  notesEnabled: boolean;
+  notesProvider: NotesProvider;
   chunkSeconds: number;
   concurrency: number;
   encodeConcurrency: number;
@@ -260,18 +265,60 @@ const writeTranscripts = async (
   });
 };
 
+const generateSelectedNotes = async (
+  info: VideoInfo,
+  evidence: TranscriptEvidence[],
+  options: RunOptions
+): Promise<NotesResult> => {
+  if (options.notesProvider !== "openrouter") {
+    return await generateAgentNotes(info, evidence, {
+      model: options.notesModel,
+      provider: options.notesProvider,
+      signal: options.signal,
+      timeoutMs: options.cloud.timeoutMs ?? 90_000,
+    });
+  }
+  if (!options.notesModel || !options.notesModelInfo) {
+    throw new Error("Notes require model preflight");
+  }
+  options.budget.reserve(
+    estimateNotesCost(evidence, options.notesModelInfo),
+    `notes for ${info.title}`
+  );
+  let notes: NotesResult;
+  try {
+    notes = await generateNotes(info, evidence, {
+      apiKey: options.cloud.apiKey,
+      maxTokens: 2048,
+      model: options.notesModel,
+      region: options.cloud.region,
+      retries: options.cloud.retries,
+      signal: options.signal,
+      timeoutMs: options.cloud.timeoutMs,
+    });
+  } catch (error) {
+    options.budget.record(null);
+    throw error;
+  }
+  options.budget.record(notes.cost);
+  return notes;
+};
+
 const writeNotes = async (
   jobDir: string,
   info: VideoInfo,
   transcripts: ChunkTranscript[],
   options: RunOptions
 ): Promise<string | undefined> => {
-  const model = options.notesModel;
-  if (!model) {
+  if (!options.notesEnabled) {
     return undefined;
   }
-  if (!options.notesModelInfo) {
-    throw new Error("Notes require model preflight");
+  const model =
+    options.notesProvider === "openrouter"
+      ? options.notesModel
+      : agentNotesModel(options.notesProvider, options.notesModel);
+  if (!model) {
+    throw new Error("Notes require a model");
   }
   const evidence = buildEvidence(transcripts);
   const key = digest(
@@ -279,7 +326,9 @@ const writeNotes = async (
       "notes-v1",
       info.title,
       model,
-      options.cloud.region,
+      options.notesProvider === "openrouter"
+        ? options.cloud.region
+        : options.notesProvider,
       2048,
       evidence.map((item) => [
         item.id,
@@ -304,25 +353,7 @@ const writeNotes = async (
   if (notes) {
     options.log("Using cached notes");
   } else {
-    options.budget.reserve(
-      estimateNotesCost(evidence, options.notesModelInfo),
-      `notes for ${info.title}`
-    );
-    try {
-      notes = await generateNotes(info, evidence, {
-        apiKey: options.cloud.apiKey,
-        maxTokens: 2048,
-        model,
-        region: options.cloud.region,
-        retries: options.cloud.retries,
-        signal: options.signal,
-        timeoutMs: options.cloud.timeoutMs,
-      });
-    } catch (error) {
-      options.budget.record(null);
-      throw error;
-    }
-    options.budget.record(notes.cost);
+    notes = await generateSelectedNotes(info, evidence, options);
     await atomicWrite(notesPath, JSON.stringify(notes));
   }
   if (!notes) {
@@ -367,9 +398,9 @@ export const runInput = async (
       `${saved.filter(Boolean).length}/${chunks.length} cached; new transcription estimate ${estimate === null ? "unknown" : `$${estimate.toFixed(4)}`}`
     );
     if (options.dryRun) {
-      if (options.notesModel) {
+      if (options.notesEnabled) {
         log(
-          "Notes estimate requires completed transcription; no paid requests made."
+          "Notes require completed transcription; no notes requests or agent processes started during dry-run."
         );
       }
       return [];

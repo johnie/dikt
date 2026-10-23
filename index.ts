@@ -88,6 +88,22 @@ const expandInputs = async (
   return [...new Set(inputs)];
 };
 
+const validateNotesAgent = (options: CliRunOptions): void => {
+  if (!options.notesEnabled || options.notesProvider === "openrouter") {
+    return;
+  }
+  if (!Bun.which(options.notesProvider)) {
+    throw new Error(
+      `Notes agent executable not found: ${options.notesProvider}. Install it and log in before running Dikt.`
+    );
+  }
+  console.error(
+    kleur.yellow(
+      `Notes agent: ${options.notesProvider}; uses its own login, provider routing and usage limits. --region and --max-cost do not govern agent usage.`
+    )
+  );
+};
+
 const prepareRun = async (
   options: CliRunOptions,
   signal: AbortSignal
@@ -97,6 +113,9 @@ const prepareRun = async (
   let modelFingerprint: string | undefined;
   let modelInfo: ModelInfo | undefined;
   let notesModelInfo: ModelInfo | undefined;
+  const cloudNotesModel =
+    options.notesProvider === "openrouter" ? options.notesModel : undefined;
+  validateNotesAgent(options);
   if (options.backend === "local") {
     if (!options.localModel) {
       throw new Error(
@@ -127,7 +146,7 @@ const prepareRun = async (
     await validateLocal(local);
     modelFingerprint = await fingerprint(local.modelPath, signal);
   }
-  if (options.backend === "openrouter" || options.notesModel) {
+  if (options.backend === "openrouter" || cloudNotesModel) {
     if (!apiKey) {
       throw new Error("OPENROUTER_API_KEY is not set (add it to .env)");
     }
@@ -155,8 +174,8 @@ const prepareRun = async (
       );
     }
   }
-  if (options.notesModel) {
-    notesModelInfo = await preflight(options.notesModel, options.region, {
+  if (cloudNotesModel) {
+    notesModelInfo = await preflight(cloudNotesModel, options.region, {
       apiKey,
       modality: "text",
       signal,
@@ -197,8 +216,10 @@ const prepareRun = async (
     log: (message) => console.error(kleur.dim(message)),
     modelFingerprint,
     modelInfo,
+    notesEnabled: options.notesEnabled,
     notesModel: options.notesModel,
     notesModelInfo,
+    notesProvider: options.notesProvider,
     outDir: options.outDir,
     signal,
     speakerNames: options.speakerNames,
@@ -228,7 +249,7 @@ const runBatch = async (
     options.signal
   );
   console.error(
-    `${(failures ? kleur.yellow : kleur.green)(`${inputs.length - failures}/${inputs.length} input(s) completed`)}; ${options.budget.describe()}`
+    `${(failures ? kleur.yellow : kleur.green)(`${inputs.length - failures}/${inputs.length} input(s) completed`)}; ${options.budget.describe()}${options.notesEnabled && options.notesProvider !== "openrouter" ? "; agent usage excluded" : ""}`
   );
   if (failures) {
     process.exitCode = 1;
