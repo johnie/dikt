@@ -89,15 +89,15 @@ bun run dikt models --region eu --modality text
 bun run dikt ./meeting.mp4 --notes-model "$NOTES_MODEL" --max-cost 1
 ```
 
-`--notes` enables notes with the default `google/gemini-2.5-flash` text model. Its availability depends on the selected regional catalog; use `--notes-model` to choose another model. Supplying `--notes-model` also enables notes.
+`--notes` uses OpenRouter with the default `google/gemini-2.5-flash` text model. Its availability depends on the selected regional catalog; use `--notes-model` to choose another model. Supplying `--notes-model` also enables notes. OpenRouter remains the default notes provider.
 
 Dikt writes a separate `.notes.md` file after publishing the raw transcript. Key points and takeaways are AI interpretations with evidence references. Quotes must be exact contiguous substrings of the cited transcript evidence. References lead to included original evidence and real source timestamps when available. Untimed evidence stays untimed.
 
 Invalid references, invented quotations, refusals, truncated completions and malformed structured JSON fail the notes step. Existing raw transcript outputs remain available. Validation proves quote fidelity and reference existence, not the truth of an AI interpretation or the accuracy of speech recognition.
 
-Notes send the recording title and complete transcript evidence to a text model in the same selected cloud region. Dikt uses a conservative UTF-8 byte bound, reserves 8192 tokens for prompt/schema overhead and limits generated output to 2048 tokens. Oversized or unknown-context requests fail without truncating evidence. Notes have separate cost reporting and their own checkpoint.
+OpenRouter notes send the recording title and complete transcript evidence to a text model in the selected cloud region. Dikt uses a conservative UTF-8 byte bound, reserves 8192 tokens for prompt/schema overhead and limits generated output to 2048 tokens. Oversized or unknown-context requests fail without truncating evidence. Notes have separate cost reporting and their own checkpoint.
 
-Local transcription does not imply permission to upload its text. To request cloud notes from a local run, provide both explicit consent and an explicit notes model:
+Local transcription does not imply permission to upload its text. To request OpenRouter notes from a local run, provide both explicit consent and an explicit notes model:
 
 ```bash
 bun run dikt ./meeting.wav --backend local \
@@ -106,6 +106,34 @@ bun run dikt ./meeting.wav --backend local \
 ```
 
 This uploads transcript text and the title, not audio. It requires `OPENROUTER_API_KEY` and uses the selected `--region`.
+
+### Notes through Codex, OMP or Claude Code
+
+Install the agent CLI and sign in through its own login flow, then select it as the notes provider:
+
+```bash
+bun run dikt ./meeting.mp4 --notes-provider codex
+bun run dikt ./meeting.mp4 --notes-provider omp
+bun run dikt ./meeting.mp4 --notes-provider claude --notes-model sonnet
+```
+
+Selecting an agent provider enables notes without `--notes`. Dikt invokes the installed `codex`, `omp` or `claude` executable, sends the title and transcript evidence over stdin, validates the returned citations and exact quotes, and writes the usual `.notes.md` file. Transcription still uses the selected OpenRouter or local backend.
+
+To use local transcription plus agent-generated notes without OpenRouter:
+
+```bash
+bun run dikt ./meeting.wav --backend local \
+  --local-model ./models/ggml-small.bin --language en \
+  --notes-provider codex --allow-cloud-notes
+```
+
+`--allow-cloud-notes` grants permission to send a local transcript to the agent's provider. An explicit notes model is optional for agent providers. `--notes-model` passes the model selection to that CLI; otherwise its isolated invocation chooses the default. Codex skips user configuration, including custom model/provider settings, while retaining its native login; pass `--notes-model` to override its built-in default.
+
+Dikt starts a fresh non-interactive process in a private temporary directory, disables tools and customizations where supported, and disables session persistence. It does not join an existing conversation, extract credentials, or fall back to OpenRouter on failure. Failed notes leave the raw transcript available. `--timeout-seconds` bounds each agent invocation; cancellation stops the process group. `--dry-run` never starts an agent.
+
+The CLI manages authentication and billing. A subscription login uses that tool's subscription allowance; API-key or gateway configuration can select separate billing instead. Agent routing does not inherit Dikt's `--region` guarantee, and `--max-cost` does not limit agent usage. Dikt reports agent notes cost as unknown and excludes it from OpenRouter spending totals.
+
+Notes checkpoints distinguish the provider and requested model. An omitted model appears as `cli-default`, not a verified resolved model name. If you change a CLI's default model, specify the new `--notes-model` to avoid reusing notes for the previous default; transcription checkpoints remain reusable.
 
 ## Resume and spending
 
@@ -175,15 +203,16 @@ Help and the tab-separated model catalog go to stdout; progress, warnings, error
 | `--vocabulary <term>` | none | Repeatable expected terms |
 | `--speaker-name <chunk:speaker=name>` | none | Repeatable scoped names, requires diarization |
 | `--notes` | off | Generate a separate notes file |
-| `--notes-model <slug>` | `google/gemini-2.5-flash` for cloud notes | Select and enable notes |
-| `--allow-cloud-notes` | off | Consent for notes from local transcription |
+| `--notes-model <slug>` | `google/gemini-2.5-flash` for OpenRouter; CLI default for agents | Select and enable notes |
+| `--allow-cloud-notes` | off | Consent to send a local transcript for OpenRouter or agent notes |
+| `--notes-provider <name>` | `openrouter` | `openrouter`, `codex`, `omp` or `claude`; selecting an agent enables notes |
 | `--batch <file>` | none | Repeatable additional list files |
 | `--playlist` | off | Expand input URLs as playlists |
 | `--concurrency <n>` | `3` cloud, `1` local | Transcription workers |
 | `--encode-concurrency <n>` | `2` | Encoding workers |
-| `--timeout-seconds <n>` | `90` | Per-cloud-request deadline, including retries |
+| `--timeout-seconds <n>` | `90` | Per-cloud-request deadline including retries, or per-agent-process deadline |
 | `--retries <n>` | `2` | Explicit transient HTTP retries, from 0 to 5 |
-| `--max-cost <usd>` | none | Run-wide estimated new-request admission budget |
+| `--max-cost <usd>` | none | Run-wide estimated new-request admission budget for OpenRouter; excludes agent usage |
 | `--dry-run` | off | Prepare and estimate without paid calls |
 | `--force` | off | Bypass saved results |
 | `--cache <dir>` | `<project>/.cache/dikt` | Persistent job cache |
@@ -194,7 +223,7 @@ For `models`, `--modality transcription|text` selects the catalog; the default i
 
 ## Privacy and retention
 
-EU mode sends cloud requests only to `https://eu.openrouter.ai`. Dikt does not retry on the global host or follow API redirects. OpenRouter [in-region routing](https://openrouter.ai/docs/guides/features/in-region-routing) requires a Business or Enterprise plan. Catalog availability cannot prove that your key has that entitlement; an authorization failure explains the requirement without changing regions. Configure an OpenRouter account/key region guardrail as an additional boundary.
+EU mode sends Dikt's OpenRouter requests only to `https://eu.openrouter.ai`. Dikt does not retry on the global host or follow API redirects. OpenRouter [in-region routing](https://openrouter.ai/docs/guides/features/in-region-routing) requires a Business or Enterprise plan. Catalog availability cannot prove that your key has that entitlement; an authorization failure explains the requirement without changing regions. Configure an OpenRouter account/key region guardrail as an additional boundary. External agent CLIs use their own providers and routing.
 
 Local file transcription stays offline unless you request cloud notes with explicit consent. URL downloads contact the source site regardless of backend.
 
