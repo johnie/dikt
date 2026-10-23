@@ -91,3 +91,50 @@ test("duplicate scoped speaker assignments cannot silently overwrite an identity
     ])
   ).toThrow("Duplicate speaker name");
 });
+
+test("repeated hints and batch files preserve their order without consuming caller arguments", () => {
+  const args = [
+    "recording.wav",
+    "--batch",
+    "first.txt",
+    "--batch",
+    "second.txt",
+    "--vocabulary",
+    "Schibsted",
+    "--vocabulary",
+    "Fortnox",
+    "--diarize",
+    "--speaker-name",
+    "1:1=Alice",
+    "--speaker-name",
+    "2:1=Bob",
+  ];
+  const original = [...args];
+  const command = parseCli(args);
+  if (command.kind !== "run") {
+    throw new Error("Expected run command");
+  }
+  expect(command.inputs).toEqual(["recording.wav"]);
+  expect(command.batchFiles).toEqual(["first.txt", "second.txt"]);
+  expect(command.options.vocabulary).toEqual(["Schibsted", "Fortnox"]);
+  expect(command.options.speakerNames).toEqual({
+    "1:1": "Alice",
+    "2:1": "Bob",
+  });
+  expect(args).toEqual(original);
+});
+
+test("end-of-options paths are inputs exactly once, not flags", () => {
+  const command = parseCli(["first.wav", "--", "--second.wav", "-h"]);
+  if (command.kind !== "run") {
+    throw new Error("Expected run command");
+  }
+  expect(command.inputs).toEqual(["first.wav", "--second.wav", "-h"]);
+});
+
+test("missing option values and unknown flags cannot silently start a job", () => {
+  for (const flag of ["--out", "-m", "--vocabulary", "--batch"]) {
+    expect(() => parseCli(["recording.wav", flag])).toThrow("requires a value");
+  }
+  expect(() => parseCli(["recording.wav", "--typo"])).toThrow("Unknown option");
+});
