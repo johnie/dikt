@@ -138,3 +138,51 @@ test("missing option values and unknown flags cannot silently start a job", () =
   }
   expect(() => parseCli(["recording.wav", "--typo"])).toThrow("Unknown option");
 });
+
+test("agent notes require consent before sending a local transcript", () => {
+  for (const provider of ["codex", "omp", "claude"] as const) {
+    expect(() =>
+      parseCli([
+        "meeting.wav",
+        "--backend",
+        "local",
+        "--notes-provider",
+        provider,
+      ])
+    ).toThrow("stay offline");
+    const command = parseCli([
+      "meeting.wav",
+      "--backend",
+      "local",
+      "--notes-provider",
+      provider,
+      "--allow-cloud-notes",
+    ]);
+    if (command.kind !== "run") {
+      throw new Error("Expected run command");
+    }
+    expect(command.options.notesProvider).toBe(provider);
+    expect(command.options.notesEnabled).toBe(true);
+    expect(command.options.notesModel).toBeUndefined();
+  }
+});
+
+test("an agent model override stays separate from the transcription model", () => {
+  const command = parseCli([
+    "meeting.wav",
+    "--notes-provider",
+    "codex",
+    "--notes-model",
+    "agent/model",
+    "--model",
+    "transcription/model",
+  ]);
+  if (command.kind !== "run") {
+    throw new Error("Expected run command");
+  }
+  expect(command.options.notesModel).toBe("agent/model");
+  expect(command.options.model).toBe("transcription/model");
+  expect(() =>
+    parseCli(["meeting.wav", "--notes-provider", "unknown"])
+  ).toThrow();
+});
