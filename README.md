@@ -146,7 +146,18 @@ A per-recording failure does not discard earlier checkpoints or prevent later in
 
 ## Options
 
-Run `bun run dikt --help` for command syntax.
+Run `bun run dikt` or `bun run dikt --help` for generated syntax, option defaults and examples. Use command-specific help to narrow the usage:
+
+```bash
+bun run dikt models --help
+bun run dikt batch --help
+bun run dikt playlist --help
+bun run dikt transcribe --help
+```
+
+The CLI uses [cleye](https://github.com/privatenumber/cleye) for typed flags and generated help, and [kleur](https://github.com/lukeed/kleur) for terminal colors. Unknown flags and missing option values fail before media preparation. Use `--` before input paths that start with `-`.
+
+Help and the tab-separated model catalog go to stdout; progress, warnings, errors and completion counts go to stderr. Colors turn off for redirected output. Set `NO_COLOR=1` or `FORCE_COLOR=0` to disable colors, or `FORCE_COLOR=1` to force them.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
