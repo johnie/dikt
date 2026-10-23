@@ -1,6 +1,8 @@
 import path from "node:path";
-import { parseArgs } from "node:util";
 
+import { cli } from "cleye";
+import type { Flags } from "cleye";
+import kleur from "kleur";
 import { z } from "zod";
 
 import type { OutputFormat } from "./exports.ts";
@@ -8,48 +10,6 @@ import { DEFAULT_MODEL, DEFAULT_REGION } from "./settings.ts";
 import type { Region } from "./settings.ts";
 
 const ROOT = path.dirname(import.meta.dir);
-export const USAGE = `Usage:
-  bun run dikt <url-or-file> [more inputs...] [options]
-  bun run dikt batch <list.txt> [options]
-  bun run dikt playlist <url> [options]
-  bun run dikt models [--region eu|global] [--modality transcription|text]
-
-Transcribe video/audio to Markdown, JSON, SRT and VTT. Completed chunks resume
-from disk; changing transcription options creates a separate job.
-
-Options:
-  -m, --model <slug>          Cloud STT model (default: ${DEFAULT_MODEL})
-  -r, --region <eu|global>    Cloud region (default: ${DEFAULT_REGION}); never silently switches
-  -l, --language <code>       ISO-639-1 language hint (default: auto)
-  -d, --diarize               Request chunk-local speaker labels (cloud only)
-  -c, --chunk-minutes <n>     Maximum audio per request (default: 10)
-  -o, --out <dir>             Output directory (default: <project>/transcripts)
-      --format <list>         Comma-separated md,json,srt,vtt (default: md)
-      --backend <name>        openrouter (default) or local (whisper.cpp)
-      --local-model <file>    whisper.cpp GGML model file for local backend
-      --whisper-bin <path>    whisper-cli executable (default: whisper-cli)
-      --prompt <text>         Context on providers supporting free-form prompts
-      --vocabulary <term>     Expected vocabulary; repeat for more terms
-      --speaker-name <key=name>  Repeat; one-based chunk:speaker, e.g. 1:1=Alice
-      --notes                Write separate source-linked notes and exact quotes
-      --notes-model <slug>    Notes model (cloud default: google/gemini-2.5-flash)
-      --allow-cloud-notes     Local notes consent; also requires --notes-model
-      --batch <file>          Additional list files, one input per line; repeatable
-      --playlist             Expand positional URLs as playlists
-      --concurrency <n>      Transcription workers (default: 3; local: 1)
-      --encode-concurrency <n>  ffmpeg workers (default: 2)
-      --timeout-seconds <n>  Cloud request timeout (default: 90)
-      --retries <n>          Transient HTTP retries, 0–5 (default: 2)
-      --max-cost <usd>       Estimated NEW request admission budget for this run;
-                              not a billing cap; unknown pricing blocked
-      --dry-run              Prepare inputs and show cache/estimates, no paid calls
-      --force                Retranscribe instead of using saved results
-      --cache <dir>          Job cache (default: <project>/.cache/dikt)
-      --downloads <dir>      Downloads (default: <project>/downloads)
-  -h, --help                  Show help
-
-Cloud calls require OPENROUTER_API_KEY. EU routing requires a Business/Enterprise
-plan. Local file transcription stays offline. Subtitles require real timestamps.`;
 
 export interface CliRunOptions {
   backend: "openrouter" | "local";
@@ -77,7 +37,7 @@ export interface CliRunOptions {
   dryRun: boolean;
 }
 export type CliCommand =
-  | { kind: "help" }
+  | { kind: "help"; showHelp: () => void }
   | { kind: "models"; region: Region; modality: "transcription" | "text" }
   | {
       kind: "run";
@@ -178,51 +138,259 @@ const maximumCost = (value: string | undefined): number | undefined => {
   return result.data;
 };
 
-export const parseCli = (args: string[]): CliCommand => {
-  const { values, positionals } = parseArgs({
-    allowPositionals: true,
-    args,
-    options: {
-      "allow-cloud-notes": { default: false, type: "boolean" },
-      backend: { default: "openrouter", type: "string" },
-      batch: { default: [], multiple: true, type: "string" },
-      cache: { default: path.join(ROOT, ".cache", "dikt"), type: "string" },
-      "chunk-minutes": { default: "10", short: "c", type: "string" },
-      concurrency: { type: "string" },
-      diarize: { default: false, short: "d", type: "boolean" },
-      downloads: { default: path.join(ROOT, "downloads"), type: "string" },
-      "dry-run": { default: false, type: "boolean" },
-      "encode-concurrency": { default: "2", type: "string" },
-      force: { default: false, type: "boolean" },
-      format: { default: "md", type: "string" },
-      help: { default: false, short: "h", type: "boolean" },
-      language: { short: "l", type: "string" },
-      "local-model": { type: "string" },
-      "max-cost": { type: "string" },
-      modality: { default: "transcription", type: "string" },
-      model: { default: DEFAULT_MODEL, short: "m", type: "string" },
-      notes: { default: false, type: "boolean" },
-      "notes-model": { type: "string" },
-      out: {
-        default: path.join(ROOT, "transcripts"),
-        short: "o",
-        type: "string",
-      },
-      playlist: { default: false, type: "boolean" },
-      prompt: { type: "string" },
-      region: { default: DEFAULT_REGION, short: "r", type: "string" },
-      retries: { default: "2", type: "string" },
-      "speaker-name": { default: [], multiple: true, type: "string" },
-      "timeout-seconds": { default: "90", type: "string" },
-      vocabulary: { default: [], multiple: true, type: "string" },
-      "whisper-bin": { default: "whisper-cli", type: "string" },
+const flags = {
+  allowCloudNotes: {
+    default: false,
+    description:
+      "Consent to cloud notes for local transcripts; requires --notes-model",
+    type: Boolean,
+  },
+  backend: {
+    default: "openrouter",
+    description: "Transcription backend: openrouter or local (whisper.cpp)",
+    type: String,
+  },
+  batch: {
+    description: "Additional list file, one input per line; repeatable",
+    placeholder: "<file>",
+    type: [String],
+  },
+  cache: {
+    default: path.join(ROOT, ".cache", "dikt"),
+    description: "Resumable job cache",
+    placeholder: "<dir>",
+    type: String,
+  },
+  chunkMinutes: {
+    alias: "c",
+    default: "10",
+    description: "Maximum audio per request",
+    placeholder: "<minutes>",
+    type: String,
+  },
+  concurrency: {
+    description: "Transcription workers (default: 3 cloud, 1 local)",
+    placeholder: "<n>",
+    type: String,
+  },
+  diarize: {
+    alias: "d",
+    default: false,
+    description: "Request chunk-local speaker labels (cloud only)",
+    type: Boolean,
+  },
+  downloads: {
+    default: path.join(ROOT, "downloads"),
+    description: "Downloaded media directory",
+    placeholder: "<dir>",
+    type: String,
+  },
+  dryRun: {
+    default: false,
+    description: "Prepare inputs and show cache/estimates without paid calls",
+    type: Boolean,
+  },
+  encodeConcurrency: {
+    default: "2",
+    description: "ffmpeg workers",
+    placeholder: "<n>",
+    type: String,
+  },
+  force: {
+    default: false,
+    description: "Retranscribe instead of using saved results",
+    type: Boolean,
+  },
+  format: {
+    default: "md",
+    description: "Comma-separated md,json,srt,vtt",
+    placeholder: "<list>",
+    type: String,
+  },
+  help: { alias: "h", default: false, description: "Show help", type: Boolean },
+  language: {
+    alias: "l",
+    description: "ISO-639-1 language hint (default: auto)",
+    placeholder: "<code>",
+    type: String,
+  },
+  localModel: {
+    description: "whisper.cpp GGML model for the local backend",
+    placeholder: "<file>",
+    type: String,
+  },
+  maxCost: {
+    description:
+      "Estimated NEW request budget; not a billing cap; unknown pricing blocked",
+    placeholder: "<usd>",
+    type: String,
+  },
+  modality: {
+    default: "transcription",
+    description: "Model catalog modality (models command)",
+    placeholder: "<transcription|text>",
+    type: String,
+  },
+  model: {
+    alias: "m",
+    default: DEFAULT_MODEL,
+    description: "Cloud transcription model",
+    placeholder: "<slug>",
+    type: String,
+  },
+  notes: {
+    default: false,
+    description: "Write separate source-linked notes and exact quotes",
+    type: Boolean,
+  },
+  notesModel: {
+    description:
+      "Enable notes with this model (cloud default: google/gemini-2.5-flash)",
+    placeholder: "<slug>",
+    type: String,
+  },
+  out: {
+    alias: "o",
+    default: path.join(ROOT, "transcripts"),
+    description: "Transcript and notes directory",
+    placeholder: "<dir>",
+    type: String,
+  },
+  playlist: {
+    default: false,
+    description: "Expand positional URLs as playlists",
+    type: Boolean,
+  },
+  prompt: {
+    description: "Context on providers supporting free-form prompts",
+    placeholder: "<text>",
+    type: String,
+  },
+  region: {
+    alias: "r",
+    default: DEFAULT_REGION,
+    description: "Cloud region; never silently switches",
+    placeholder: "<eu|global>",
+    type: String,
+  },
+  retries: {
+    default: "2",
+    description: "Transient HTTP retries, 0–5",
+    placeholder: "<n>",
+    type: String,
+  },
+  speakerName: {
+    description: "Repeatable one-based speaker assignment, e.g. 1:1=Alice",
+    placeholder: "<chunk:speaker=name>",
+    type: [String],
+  },
+  timeoutSeconds: {
+    default: "90",
+    description: "Cloud request timeout",
+    placeholder: "<seconds>",
+    type: String,
+  },
+  vocabulary: {
+    description: "Expected vocabulary; repeatable",
+    placeholder: "<term>",
+    type: [String],
+  },
+  whisperBin: {
+    default: "whisper-cli",
+    description: "whisper-cli executable",
+    placeholder: "<path>",
+    type: String,
+  },
+} satisfies Flags;
+
+const parseArgv = (args: string[]) => {
+  const argv = cli(
+    {
+      flags,
+      help: false,
+      name: "dikt",
     },
+    undefined,
+    [...args]
+  );
+  const unknown = Object.keys(argv.unknownFlags);
+  if (unknown.length) {
+    throw new Error(
+      `Unknown option(s): ${unknown.map((flag) => `--${flag}`).join(", ")}. Run bun run dikt --help.`
+    );
+  }
+  for (const [name, value] of Object.entries(argv.flags)) {
+    if (value === "" || (Array.isArray(value) && value.includes(""))) {
+      const flag = name.replaceAll(
+        /[A-Z]/gu,
+        (letter) => `-${letter.toLowerCase()}`
+      );
+      throw new Error(`Option --${flag} requires a value`);
+    }
+  }
+  return argv;
+};
+
+const commandUsage = {
+  batch: "bun run dikt batch <list.txt> [flags...]",
+  models: "bun run dikt models [flags...]",
+  playlist: "bun run dikt playlist <url> [more URLs...] [flags...]",
+  transcribe:
+    "bun run dikt transcribe <url-or-file> [more inputs...] [flags...]",
+};
+
+const showCliHelp = (command: string | undefined): void => {
+  const helpFlags =
+    command === "models"
+      ? { help: flags.help, modality: flags.modality, region: flags.region }
+      : flags;
+  const { showHelp: renderHelp } = cli(
+    { flags: helpFlags, help: false, name: "dikt" },
+    undefined,
+    []
+  );
+  renderHelp({
+    description:
+      command === "models"
+        ? "List regional model capabilities and pricing. Unknown support remains unknown."
+        : "Transcribe video/audio to Markdown, JSON, SRT and VTT.\nCompleted chunks resume from disk; changed transcription options create a separate job.",
+    examples:
+      command === "models"
+        ? [
+            "bun run dikt models --region eu",
+            "bun run dikt models --region global --modality text",
+          ]
+        : [
+            "bun run dikt ./meeting.mp4 --language en --format md,json,srt,vtt",
+            "bun run dikt batch ./sources.txt --dry-run",
+            "bun run dikt ./meeting.wav --backend local --local-model ./models/ggml-small.bin",
+          ],
+    usage: Object.entries(commandUsage).find(
+      ([name]) => name === command
+    )?.[1] ?? [
+      "bun run dikt <url-or-file> [more inputs...] [flags...]",
+      ...Object.values(commandUsage),
+    ],
   });
-  if (values.help) {
-    return { kind: "help" };
+  console.log(
+    kleur.dim(
+      "Cloud calls require OPENROUTER_API_KEY. EU routing requires a Business/Enterprise plan.\nLocal file transcription stays offline. Subtitles require real timestamps."
+    )
+  );
+};
+
+export const parseCli = (args: string[]): CliCommand => {
+  const argv = parseArgv(args);
+  const values = argv.flags;
+  const positionals = argv._;
+  const [command] = positionals;
+  if (values.help || args.length === 0) {
+    return {
+      kind: "help",
+      showHelp: () => showCliHelp(command),
+    };
   }
   const region = z.enum(["eu", "global"]).parse(values.region);
-  const [command] = positionals;
   if (command === "models") {
     if (positionals.length !== 1) {
       throw new Error("models takes no positional input");
@@ -235,12 +403,12 @@ export const parseCli = (args: string[]): CliCommand => {
   }
   const backend = z.enum(["openrouter", "local"]).parse(values.backend);
   const chunkSeconds =
-    positiveNumber(values["chunk-minutes"], "--chunk-minutes") * 60;
+    positiveNumber(values.chunkMinutes, "--chunk-minutes") * 60;
   if (!Number.isFinite(chunkSeconds)) {
     throw new TypeError("--chunk-minutes is too large");
   }
   const timeoutMs =
-    positiveNumber(values["timeout-seconds"], "--timeout-seconds") * 1000;
+    positiveNumber(values.timeoutSeconds, "--timeout-seconds") * 1000;
   if (!Number.isSafeInteger(timeoutMs)) {
     throw new TypeError(
       "--timeout-seconds must resolve to safe integer milliseconds"
@@ -259,7 +427,7 @@ export const parseCli = (args: string[]): CliCommand => {
     inputs.length = 0;
   }
   if (!inputs.length && !batchFiles.length) {
-    throw new Error(`No input supplied.\n${USAGE}`);
+    throw new Error("No input supplied. Run bun run dikt --help for usage.");
   }
   const options: CliRunOptions = {
     backend,
@@ -271,9 +439,9 @@ export const parseCli = (args: string[]): CliCommand => {
     ),
     diarize: values.diarize,
     downloadDir: path.resolve(values.downloads),
-    dryRun: values["dry-run"],
+    dryRun: values.dryRun,
     encodeConcurrency: integer(
-      values["encode-concurrency"],
+      values.encodeConcurrency,
       "--encode-concurrency"
     ),
     force: values.force,
@@ -283,23 +451,23 @@ export const parseCli = (args: string[]): CliCommand => {
       .regex(/^[a-z]{2}$/u)
       .optional()
       .parse(values.language),
-    localModel: values["local-model"],
-    maximumCost: maximumCost(values["max-cost"]),
+    localModel: values.localModel,
+    maximumCost: maximumCost(values.maxCost),
     model: z.string().min(1).parse(values.model),
     notesModel: chooseNotes(
       backend,
-      values.notes || values["notes-model"] !== undefined,
-      values["notes-model"],
-      values["allow-cloud-notes"]
+      values.notes || values.notesModel !== undefined,
+      values.notesModel,
+      values.allowCloudNotes
     ),
     outDir: path.resolve(values.out),
     prompt: values.prompt?.trim() || undefined,
     region,
     retries: integer(values.retries, "--retries", 0, 5),
-    speakerNames: speakerMap(values["speaker-name"], values.diarize),
+    speakerNames: speakerMap(values.speakerName, values.diarize),
     timeoutMs,
     vocabulary: z.array(z.string().trim().min(1)).parse(values.vocabulary),
-    whisperBin: values["whisper-bin"],
+    whisperBin: values.whisperBin,
   };
   return {
     batchFiles,

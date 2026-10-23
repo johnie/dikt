@@ -1,8 +1,10 @@
 import path from "node:path";
 
+import kleur from "kleur";
+
 import { Budget } from "./src/budget.ts";
 import { fingerprint } from "./src/cache.ts";
-import { parseCli, USAGE } from "./src/cli.ts";
+import { parseCli } from "./src/cli.ts";
 import type { CliCommand, CliRunOptions } from "./src/cli.ts";
 import { expandPlaylist } from "./src/download.ts";
 import { validateLocal } from "./src/local.ts";
@@ -16,21 +18,25 @@ import { BASE_URLS } from "./src/settings.ts";
 
 const capability = (value: boolean | null): string => {
   if (value === null) {
-    return "unknown";
+    return kleur.dim("unknown");
   }
-  return value ? "yes" : "no";
+  return value ? kleur.green("yes") : kleur.yellow("no");
 };
 const showModels = (models: ModelInfo[], region: string): void => {
   console.log(
-    `Region: ${region}; unknown means the catalog does not establish support.`
+    kleur.dim(
+      `Region: ${region}; unknown means the catalog does not establish support.`
+    )
   );
   console.log(
-    "MODEL\tLANGUAGES\tTIMESTAMPS\tDIARIZATION\tVOCABULARY\tUSD/SECOND"
+    kleur.bold(
+      "MODEL\tLANGUAGES\tTIMESTAMPS\tDIARIZATION\tVOCABULARY\tUSD/SECOND"
+    )
   );
   for (const model of models) {
     console.log(
       [
-        model.id,
+        kleur.cyan(model.id),
         model.languages?.join(",") ?? "unknown",
         capability(model.timestamps),
         capability(model.diarization),
@@ -126,7 +132,9 @@ const prepareRun = async (
       throw new Error("OPENROUTER_API_KEY is not set (add it to .env)");
     }
     console.error(
-      `Cloud region: ${options.region} (${BASE_URLS[options.region]})${options.region === "eu" ? "; Business/Enterprise plan required" : "; audio/text may be processed outside the EU"}`
+      kleur.yellow(
+        `Cloud region: ${options.region} (${BASE_URLS[options.region]})${options.region === "eu" ? "; Business/Enterprise plan required" : "; audio/text may be processed outside the EU"}`
+      )
     );
   }
   if (options.backend === "openrouter") {
@@ -156,7 +164,9 @@ const prepareRun = async (
   }
   if (options.maximumCost !== undefined) {
     console.error(
-      "--max-cost limits estimated admitted requests, not provider billing; failed/retried requests may be charged."
+      kleur.yellow(
+        "--max-cost limits estimated admitted requests, not provider billing; failed/retried requests may be charged."
+      )
     );
   }
   return {
@@ -184,7 +194,7 @@ const prepareRun = async (
     force: options.force,
     formats: options.formats,
     local,
-    log: (message) => console.error(message),
+    log: (message) => console.error(kleur.dim(message)),
     modelFingerprint,
     modelInfo,
     notesModel: options.notesModel,
@@ -210,7 +220,7 @@ const runBatch = async (
       } catch (error) {
         failures += 1;
         console.error(
-          `${input}: ${error instanceof Error ? error.message : String(error)}`
+          `${kleur.red().bold("Error:")} ${input}: ${error instanceof Error ? error.message : String(error)}`
         );
         options.signal.throwIfAborted();
       }
@@ -218,7 +228,7 @@ const runBatch = async (
     options.signal
   );
   console.error(
-    `${inputs.length - failures}/${inputs.length} input(s) completed; ${options.budget.describe()}`
+    `${(failures ? kleur.yellow : kleur.green)(`${inputs.length - failures}/${inputs.length} input(s) completed`)}; ${options.budget.describe()}`
   );
   if (failures) {
     process.exitCode = 1;
@@ -228,7 +238,7 @@ const runBatch = async (
 const main = async (): Promise<void> => {
   const command = parseCli(Bun.argv.slice(2));
   if (command.kind === "help") {
-    console.log(USAGE);
+    command.showHelp();
     return;
   }
   const controller = new AbortController();
@@ -263,6 +273,8 @@ const main = async (): Promise<void> => {
 try {
   await main();
 } catch (error) {
-  console.error(error instanceof Error ? error.message : String(error));
+  console.error(
+    `${kleur.red().bold("Error:")} ${error instanceof Error ? error.message : String(error)}`
+  );
   process.exitCode = 1;
 }
