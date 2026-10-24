@@ -5,6 +5,7 @@ import type { Flags } from "cleye";
 import kleur from "kleur";
 import { z } from "zod";
 
+import type { NotesProvider } from "./agent-notes.ts";
 import type { OutputFormat } from "./exports.ts";
 import { DEFAULT_MODEL, DEFAULT_REGION } from "./settings.ts";
 import type { Region } from "./settings.ts";
@@ -23,6 +24,8 @@ export interface CliRunOptions {
   localModel: string | undefined;
   whisperBin: string;
   notesModel: string | undefined;
+  notesEnabled: boolean;
+  notesProvider: NotesProvider;
   chunkSeconds: number;
   concurrency: number;
   encodeConcurrency: number;
@@ -109,23 +112,40 @@ const speakerMap = (values: string[], diarize: boolean) => {
 };
 const chooseNotes = (
   backend: "local" | "openrouter",
-  enabled: boolean,
+  requested: boolean,
   explicitModel: string | undefined,
-  cloudConsent: boolean
-): string | undefined => {
+  cloudConsent: boolean,
+  provider: NotesProvider
+) => {
+  const enabled =
+    requested || explicitModel !== undefined || provider !== "openrouter";
   if (!enabled) {
-    return undefined;
+    return { enabled, model: undefined };
   }
-  if (backend === "local" && (!cloudConsent || !explicitModel)) {
+  if (backend === "local" && !cloudConsent) {
+    throw new Error(
+      "Local transcripts stay offline: notes require --allow-cloud-notes"
+    );
+  }
+  if (provider !== "openrouter") {
+    return {
+      enabled,
+      model: z.string().trim().min(1).optional().parse(explicitModel),
+    };
+  }
+  if (backend === "local" && !explicitModel) {
     throw new Error(
       "Local transcripts stay offline: notes require --allow-cloud-notes and an explicit --notes-model"
     );
   }
-  return z
-    .string()
-    .trim()
-    .min(1)
-    .parse(explicitModel ?? "google/gemini-2.5-flash");
+  return {
+    enabled,
+    model: z
+      .string()
+      .trim()
+      .min(1)
+      .parse(explicitModel ?? "google/gemini-2.5-flash"),
+  };
 };
 const maximumCost = (value: string | undefined): number | undefined => {
   if (value === undefined) {
@@ -142,7 +162,7 @@ const flags = {
   allowCloudNotes: {
     default: false,
     description:
-      "Consent to cloud notes for local transcripts; requires --notes-model",
+      "Consent to send local transcripts for notes (OpenRouter also requires --notes-model)",
     type: Boolean,
   },
   backend: {
@@ -221,7 +241,7 @@ const flags = {
   },
   maxCost: {
     description:
-      "Estimated NEW request budget; not a billing cap; unknown pricing blocked",
+      "Estimated NEW OpenRouter request budget; excludes agent usage; not a billing cap",
     placeholder: "<usd>",
     type: String,
   },
@@ -245,8 +265,15 @@ const flags = {
   },
   notesModel: {
     description:
-      "Enable notes with this model (cloud default: google/gemini-2.5-flash)",
+      "Enable notes with this model (OpenRouter default: google/gemini-2.5-flash; agents: CLI default)",
     placeholder: "<slug>",
+    type: String,
+  },
+  notesProvider: {
+    default: "openrouter",
+    description:
+      "Generate notes through OpenRouter or an installed, logged-in agent CLI",
+    placeholder: "<openrouter|codex|omp|claude>",
     type: String,
   },
   out: {
@@ -269,7 +296,7 @@ const flags = {
   region: {
     alias: "r",
     default: DEFAULT_REGION,
-    description: "Cloud region; never silently switches",
+    description: "OpenRouter region; never silently switches",
     placeholder: "<eu|global>",
     type: String,
   },
@@ -286,7 +313,7 @@ const flags = {
   },
   timeoutSeconds: {
     default: "90",
-    description: "Cloud request timeout",
+    description: "Cloud request or notes agent process timeout",
     placeholder: "<seconds>",
     type: String,
   },
@@ -374,7 +401,7 @@ const showCliHelp = (command: string | undefined): void => {
   });
   console.log(
     kleur.dim(
-      "Cloud calls require OPENROUTER_API_KEY. EU routing requires a Business/Enterprise plan.\nLocal file transcription stays offline. Subtitles require real timestamps."
+      "OpenRouter calls require OPENROUTER_API_KEY. EU routing requires a Business/Enterprise plan.\nLocal transcription stays offline; external notes require consent. Subtitles require real timestamps."
     )
   );
 };
@@ -402,6 +429,16 @@ export const parseCli = (args: string[]): CliCommand => {
     };
   }
   const backend = z.enum(["openrouter", "local"]).parse(values.backend);
+  const notesProvider = z
+    .enum(["openrouter", "codex", "omp", "claude"])
+    .parse(values.notesProvider);
+  const notes = chooseNotes(
+    backend,
+    values.notes,
+    values.notesModel,
+    values.allowCloudNotes,
+    notesProvider
+  );
   const chunkSeconds =
     positiveNumber(values.chunkMinutes, "--chunk-minutes") * 60;
   if (!Number.isFinite(chunkSeconds)) {
@@ -454,12 +491,9 @@ export const parseCli = (args: string[]): CliCommand => {
     localModel: values.localModel,
     maximumCost: maximumCost(values.maxCost),
     model: z.string().min(1).parse(values.model),
-    notesModel: chooseNotes(
-      backend,
-      values.notes || values.notesModel !== undefined,
-      values.notesModel,
-      values.allowCloudNotes
-    ),
+    notesEnabled: notes.enabled,
+    notesModel: notes.model,
+    notesProvider,
     outDir: path.resolve(values.out),
     prompt: values.prompt?.trim() || undefined,
     region,

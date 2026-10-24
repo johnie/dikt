@@ -25,19 +25,23 @@ export const runMediaProcess = (
   executable: string,
   args: readonly string[],
   signal?: AbortSignal,
-  name = executable
+  name = executable,
+  options: { input?: string; cwd?: string; env?: NodeJS.ProcessEnv } = {}
 ): Promise<MediaProcessResult> => {
   signal?.throwIfAborted();
   const { promise, resolve, reject } =
     Promise.withResolvers<MediaProcessResult>();
   const child = spawn(executable, [...args], {
-    // yt-dlp can launch ffmpeg; cancel its entire process group on POSIX.
+    cwd: options.cwd,
+    // Media tools and agents may launch children; cancel the entire POSIX group.
     detached: process.platform !== "win32",
-    stdio: ["ignore", "pipe", "pipe"],
+    env: options.env,
+    stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
   });
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
   let spawnError: Error | undefined;
+  let inputError: Error | undefined;
   let killTimer: NodeJS.Timeout | undefined;
   const terminate = (terminationSignal: NodeJS.Signals) => {
     if (process.platform === "win32" || child.pid === undefined) {
@@ -59,10 +63,14 @@ export const runMediaProcess = (
     killTimer = setTimeout(() => terminate("SIGKILL"), 1000);
     killTimer.unref();
   };
-  child.stdout.on("data", (data: Buffer) => stdout.push(data));
-  child.stderr.on("data", (data: Buffer) => stderr.push(data));
+  child.stdout?.on("data", (data: Buffer) => stdout.push(data));
+  child.stderr?.on("data", (data: Buffer) => stderr.push(data));
   child.on("error", (error) => {
     spawnError = error;
+  });
+  child.stdin?.on("error", (error) => {
+    // A CLI can close stdin before the prompt is written (including EPIPE).
+    inputError = error;
   });
   child.on("close", (code, terminationSignal) => {
     signal?.removeEventListener("abort", abort);
@@ -75,12 +83,18 @@ export const runMediaProcess = (
       reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
     } else if (spawnError) {
       reject(new Error(`${name} could not start: ${spawnError.message}`));
+    } else if (code === 0 && inputError) {
+      reject(
+        new Error(
+          `${name} could not receive input: ${inputError.message}${output.stderr.trim() ? `\n${output.stderr.trim()}` : ""}`
+        )
+      );
     } else if (code === 0) {
       resolve(output);
     } else {
       reject(
         new Error(
-          `${name} failed (${code ?? terminationSignal}):\n${output.stderr.trim()}`
+          `${name} failed (${code ?? terminationSignal}):\n${output.stderr.trim() || output.stdout.trim()}`
         )
       );
     }
@@ -88,6 +102,9 @@ export const runMediaProcess = (
   signal?.addEventListener("abort", abort, { once: true });
   if (signal?.aborted) {
     abort();
+  }
+  if (options.input !== undefined) {
+    child.stdin?.end(options.input);
   }
   return promise;
 };
